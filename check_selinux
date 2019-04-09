@@ -1,0 +1,169 @@
+#!/usr/bin/perl -w
+
+# Copyright 2014, 2019 by George Marselis <george@marsel.is>
+#
+#	This program is free software: you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation, either version 3 of the License, or
+#	(at your option) any later version.
+#
+#	This program is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#	GNU General Public License for more details.
+#
+#	You should have received a copy of the GNU General Public License
+#	along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+use strict;
+use warnings;
+
+## Packages;
+use Nagios::Plugin;
+use Data::Dumper;
+
+my $n = '';
+
+###
+# Text output parser function
+sub check_selinux {
+
+	my %audititemstate = (
+		ok				=> 'OK',
+		warning 		=> 'WARNING',
+		critical 	 	=> 'CRITICAL',
+		gru 	 		=> 'UNKNOWN',
+	);
+
+	my @args 				= ( '-b' );
+	my $audititemcounter 	= 0;
+	my $auditmessages       = 0;
+	my $status				= '';
+	my $statusmessage 		= '';
+
+
+	# open filehandle, read in input
+	open( my $audit2allow_handle, '-|', $n->opts->audit2allow, @args ) or
+		$n->nagios_exit( CRITICAL, "Cannot run '$n->opts->audit2allow': $!" );
+	my @audit2allow_output = <$audit2allow_handle>;
+	close( $audit2allow_handle );
+
+	open( my $getenforce_handle, '-|', $n->opts->getenforce ) or
+		$n->nagios_exit( CRITICAL, "Cannot run '$n->opts->getenforce': $!" );
+	my $getenforce_output  = <$getenforce_handle>;
+	close( $getenforce_handle );
+
+	chomp $getenforce_output ;
+
+	# CRITICAL if SELinux not in Enforcing
+	if( $getenforce_output eq 'Enforcing' ) {
+		$status = 'ok';    # OK
+		$statusmessage = 'SELinux status: Enforcing';
+		$n->add_perfdata( label => 'SELinux status', value => 2, min => 0, max => 2, warning => 1, critical => 0 );
+		$n->add_message( $audititemstate{ $status } , $statusmessage ) ;
+	}
+	elsif( $getenforce_output eq 'Permissive' ) {
+		$status = 'critical'; # CRITICAL
+		$statusmessage = 'SELinux policy in Permissive mode';
+		$n->add_perfdata( label => 'SELinux status', value => 1, min => 0, max => 2, warning => 1, critical => 0 );
+		$n->add_message( $audititemstate{ $status } , $statusmessage ) ;
+	}
+	elsif( $getenforce_output eq 'Disabled' ) {
+		$status = 'critical'; # CRITICAL
+		$statusmessage = 'SELinux policy in Disabled mode';
+		$n->add_perfdata( label => 'SELinux status', value => 0, min => 0, max => 2, warning => 1, critical => 0 );
+		$n->add_message( $audititemstate{ $status } , $statusmessage ) ;
+	}
+	else {
+		# Twilight Zone
+		$n->nagios_die( (caller(0))[3].": getenforce returned neither 'Enforcing' nor 'Permissive': ".$getenforce_output );
+	}
+
+	( $audititemcounter, $auditmessages ) = parse( @audit2allow_output ); 
+
+	if( $audititemcounter > 0 ) {
+		$status = 'warning';
+		$statusmessage = 'New audit log items: '.$auditmessages;
+	}
+	elsif( $audititemcounter == 0 ) {
+		$status = 'ok';
+		$statusmessage = 'No new audit log items.';
+	}
+	else {
+		# Twilight Zone 
+		n->nagios_die( (caller(0))[3].": \$audititemcounter is not positive or zero: ".$audititemcounter  );
+	}
+
+	$n->add_perfdata( label => 'SELinux auditlog items', value => $audititemcounter, min => 0, warning => 1 );
+
+	return $audititemstate{ $status }, $statusmessage;
+}
+
+sub parse {
+
+	my @input 				= @_;
+	my $audititemcounter 	= 0;
+	my @auditmessages 		= ( );
+
+	foreach( @input ) {
+
+		/^#.*/ and next;
+		/^\s+/ and next;
+
+		/^(allow.*)$/ and do {
+			$audititemcounter++;
+			push @auditmessages, $1; 
+		};
+	}
+
+	return $audititemcounter, join( ' ', @auditmessages);
+}
+
+#
+# instead of polluting main(), have a seperate function to define the
+# the command line arguments of this script
+sub add_arguments {
+
+	$n->add_arg(
+		spec 		=> 'audit2allow=s', 
+		help 		=> "SELinux policy allow/dontaudit rules from logs of denied operations generator (default: %s)",
+		default 	=> '/usr/bin/audit2allow',
+	);
+
+	$n->add_arg(
+		spec 		=> 'getenforce=s', 
+		help 		=> "SELinux policy current state accessor (default: %s)",
+		default 	=> '/usr/sbin/getenforce',
+	);
+
+}
+
+sub main {
+
+	# needs more cowbell^Whelp
+	$n = new Nagios::Plugin (
+
+		usage => "Usage: %s ",
+		license 	=> 'George Marselis <george.marselis@kaust.edu.sa>',
+		shortname 	=> 'CHECKSELINUX',
+		blurb 		=> "Nagios plug-in; checks if SELinux is turned on and how many audit messages are in the log.",
+		version 	=> '0.1',
+	);
+
+	add_arguments; # dedicated function; keep main clutter-free
+
+	$n->getopts();
+
+	# Make die return nagios UNKNOWNs
+	$SIG{__DIE__} = sub {
+		$n->nagios_die( join " " => @_ );
+	};
+
+	$n->add_message( check_selinux( ) );
+
+	$n->nagios_exit( $n->check_messages( join => '. ', join_all => '. ') );
+
+}
+
+main;
